@@ -1,4 +1,7 @@
+import json
+
 from langchain_tavily import TavilySearch
+import numpy as np
 import streamlit as st
 import operator
 from typing import TypedDict, Annotated
@@ -12,6 +15,37 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
 load_dotenv()
+
+def get_final_decision(debat, nb_samples=3):
+    scores_achat = []
+    scores_eviter = []
+    explications = []
+    
+    for _ in range(nb_samples):
+        # On utilise ton agent modérateur compilé
+        res = agent_moderateur.graph.invoke({"messages": [HumanMessage(content=debat)]})
+        raw_content = res['messages'][-1].content
+        
+        try:
+            parsed = json.loads(raw_content)
+            scores_achat.append(parsed["score_achat"])
+            scores_eviter.append(parsed["score_eviter"])
+            explications.append(parsed)
+        except:
+            continue # On ignore les erreurs de formatage rares
+
+    # On calcule la moyenne des scores pour la stabilité
+    final_achat = np.mean(scores_achat)
+    final_eviter = np.mean(scores_eviter)
+    
+    # On prend le dernier verdict pour le texte
+    return {
+        "verdict": explications[-1]["verdict"],
+        "achat": final_achat,
+        "eviter": final_eviter,
+        "explication": explications[-1]["summary"],
+        "declic": explications[-1]["arguments"]
+    }
 
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
@@ -132,11 +166,14 @@ TA MISSION :
 5. TRANCHE : Tu dois choisir un camp. Pas de "ça dépend".
 
 STRUCTURE DE TA RÉPONSE :
-- **VERDICT** : ACHAT IMMÉDIAT ou À ÉVITER. Écris-le en majuscules au début.
-- **RESUMÉ DES ARGUMENTS** : En deux phrases, résume les arguments les plus forts de chaque camp avec les chiffres qui vont avec.
-- **SCORE DE CERTITUDE ACHAT** : [X]% 
-- **SCORE DE CERTITUDE À ÉVITER** : [Y]%
-- **LES ARGUMENTS QUI ONT FAIT BASCULER LA DÉCISION** : Cite LES DEUX chiffres ou LES DEUX faits précis qui ont emporté ta décision.
+Réponds UNIQUEMENT par un objet JSON respectant ce format :
+{
+  "verdict": "ACHAT IMMÉDIAT" ou "À ÉVITER",
+  "score_achat": SCORE DE CERTITUDE pour le camp ACHAT entre 0 et 100,
+  "score_eviter": SCORE DE CERTITUDE pour le camp À ÉVITER entre 0 et 100,
+  "summary": "En deux phrases, résume les arguments les plus forts de chaque camp avec les chiffres qui vont avec",
+  "arguments": "Cite LES DEUX chiffres ou LES DEUX faits précis qui ont emporté ta décision"
+}
 
 RÈGLE D'OR : Ne fais pas de résumé poli. Tranche comme une guillotine. Ne raconte pas ta vie on a pas de temps pour ca, il n'y a que le proft a long terme qui nous interesse.
 """
@@ -171,10 +208,22 @@ if st.button("Lancer l'investigation"):
                 res_pess = agent_pessimiste.graph.invoke({"messages": [HumanMessage(content=f"Quels sont les risques d'investir dans {entreprise} ?")]})
                 st.error(res_pess['messages'][-1].content)
         st.divider()
-        st.header("⚖️ Verdict du Modérateur")
-        with st.spinner("Analyse finale en cours..."):
-            debat = f"AVIS OPTIMISTE: {res_opt['messages'][-1].content}\n\nAVIS PESSIMISTE: {res_pess['messages'][-1].content}"
-            res_final = agent_moderateur.graph.invoke({"messages": [HumanMessage(content=debat)]})
-            st.info(res_final['messages'][-1].content)
+        st.header("⚖️ VERDICT DU MODÉRATEUR (Self-Consistency)")
+        with st.spinner("⚖️ Le CIO compare les deux positions et va rendre sa décision..."):
+            debat_txt = f"BULL: {res_opt['messages'][-1].content}\nBEAR: {res_pess['messages'][-1].content}"
+            final = get_final_decision(debat_txt)
+            
+            if final:
+                # On détermine si c'est un succès (Achat) ou une erreur (Éviter)
+                is_achat = "ACHAT" in final['verdict'].upper()
+                score_confiance = final['achat'] if is_achat else final['eviter']
+                if is_achat:
+                    st.success(f"### ✅ {final['verdict']}  |  Score de certitude : {score_confiance:.1f}%")
+                else:
+                    st.error(f"### ❌ {final['verdict']}  |  Score de certitude : {score_confiance:.1f}%")
+            
+            st.info(f"**RESUME**\n\n{final['explication']}")
+                
+            st.warning(f"**FACTEUR DÉCLIC :** {final['declic']}")
     else:
         st.warning("Veuillez entrer un nom d'entreprise.")
