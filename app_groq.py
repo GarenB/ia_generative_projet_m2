@@ -1,47 +1,42 @@
 import json
-
-from langchain_tavily import TavilySearch
 import numpy as np
 import streamlit as st
 import operator
 from typing import TypedDict, Annotated
-from langchain_core.messages import AnyMessage
+from langchain_core.messages import AnyMessage, SystemMessage, HumanMessage, ToolMessage
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_groq import ChatGroq # Remplacement de OpenAI par Groq (Llama)
+from langchain_community.tools.tavily_search import TavilySearchResults
 
 load_dotenv()
 
-def get_final_decision(debat, nb_samples=3):
-    scores_achat = []
-    scores_eviter = []
-    explications = []
-    
+def get_final_decision(debat, nb_samples=2):
+    samples = []
     for _ in range(nb_samples):
         res = agent_moderateur.graph.invoke({"messages": [HumanMessage(content=debat)]})
         raw_content = res['messages'][-1].content
         
+        clean_content = raw_content.replace("```json", "").replace("```", "").strip()
+        
         try:
-            parsed = json.loads(raw_content)
-            scores_achat.append(parsed["score_achat"])
-            scores_eviter.append(parsed["score_eviter"])
-            explications.append(parsed)
+            parsed = json.loads(clean_content)
+            samples.append(parsed)
         except:
-            continue
+            continue 
 
-    final_achat = np.mean(scores_achat)
-    final_eviter = np.mean(scores_eviter)
-    
+    if not samples:
+        return {
+            "verdict": "INDÉTERMINÉ", "achat": 0, "eviter": 0, 
+            "explication": "Erreur de lecture du modèle.", "declic": "N/A"
+        }
+
     return {
-        "verdict": explications[-1]["verdict"],
-        "achat": final_achat,
-        "eviter": final_eviter,
-        "explication": explications[-1]["summary"],
-        "declic": explications[-1]["arguments"]
+        "verdict": samples[-1]["verdict"],
+        "achat": np.mean([s["score_achat"] for s in samples]),
+        "eviter": np.mean([s["score_eviter"] for s in samples]),
+        "explication": samples[-1].get("summary", ""),
+        "declic": samples[-1].get("arguments", "")
     }
 
 class AgentState(TypedDict):
@@ -51,24 +46,20 @@ class Agent:
     def __init__(self, model, tools, system=""):
         self.system = system
         graph = StateGraph(AgentState)
-        graph.add_node("llm", self.call_openai)
+        graph.add_node("llm", self.call_llm)
         graph.add_node("action", self.take_action)
-        graph.add_conditional_edges(
-            "llm",
-            self.exists_action,
-            {True: "action", False: END}
-        )
+        graph.add_conditional_edges("llm", self.exists_action, {True: "action", False: END})
         graph.add_edge("action", "llm")
         graph.set_entry_point("llm")
         self.graph = graph.compile()
         self.tools = {t.name: t for t in tools}
-        self.model = model.bind_tools(tools)
+        self.model = model.bind_tools(tools) if tools else model
 
     def exists_action(self, state: AgentState):
         result = state['messages'][-1]
-        return len(result.tool_calls) > 0
+        return len(getattr(result, 'tool_calls', [])) > 0
 
-    def call_openai(self, state: AgentState):
+    def call_llm(self, state: AgentState):
         messages = state['messages']
         if self.system:
             messages = [SystemMessage(content=self.system)] + messages
@@ -79,17 +70,13 @@ class Agent:
         tool_calls = state['messages'][-1].tool_calls
         results = []
         for t in tool_calls:
-            print(f"Calling: {t}")
-            if not t['name'] in self.tools:      
-                print("\n ....bad tool name....")
-                result = "bad tool name, retry"  
-            else:
+            if t['name'] in self.tools:
                 result = self.tools[t['name']].invoke(t['args'])
-            results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
-        print("Back to the model!")
+                results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
         return {'messages': results}
 
-model = ChatOpenAI(model="gpt-4o", temperature=0.8)
+model_llama = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.9)
+tool = TavilySearchResults(max_results=2)
 
 prompt_bull = """
 Tu es un analyste financier extrêmement optimiste, spécialisé dans la croissance.
@@ -130,15 +117,13 @@ Sois convaincant et utilise un ton professionnel mais enthousiaste.
 """
 
 prompt_moderateur = """
-Tu es un trader de hedge fund agressif. Ton but est le profit à long terme (5 a 10 ans apres l'achat), pas la prudence excessive.
-Tu sais que TOUT investissement comporte des risques. 
+Tu es un trader de hedge fund agressif. Ton but est le profit à long terme (5 ans apres l'achat).
 
-TA MISSION : Comparer les deux analyses et trancher.
+TA MISSION : Comparer les deux analyses et trancher si il faut ACHETER ou ÉVITER.
 
 RÈGLES DE DÉCISION :
 1. Si le potentiel de gain (Bull) est massivement supérieur aux risques (Bear), choisis ACHAT même si le Bear a des arguments.
-2. Ne sois pas une "poule mouillée". Tu es payé pour prendre des decision difficiles. Un risque de 20% n'annule pas une opportunité de 200%.
-3. Tranche de manière BRUTALE, PRECISE et BINAIRE.
+2. Tranche de manière BRUTALE, PRECISE et BINAIRE.
 
 MÉTHODE DE CALCUL DU SCORE DE CERTITUDE (0-100%) :
 1. QUALITÉ DES PREUVES (0-40 pts) : Les chiffres 2024-2026 cités par le camp gagnant sont-ils précis et sourcés ?
@@ -164,49 +149,45 @@ Réponds UNIQUEMENT par un objet JSON respectant ce format :
   "arguments": "Cite LES DEUX chiffres ou LES DEUX faits précis qui ont emporté ta décision"
 }
 
-RÈGLE D'OR : Ne fais pas de résumé poli. Tranche comme une guillotine. Ne raconte pas ta vie on a pas de temps pour ca, il n'y a que le profit a long terme qui nous interesse.
+RÈGLE D'OR : Ne fais pas de résumé poli. Tranche comme une guillotine. Ne raconte pas ta vie on a pas de temps pour ca.
 """
 
 
-tool = TavilySearch(max_results=4)
-agent_optimiste = Agent(model, [tool], system=prompt_bull)
-agent_pessimiste = Agent(model, [tool], system=prompt_bear)
-agent_moderateur = Agent(model, [tool], system=prompt_moderateur)
+agent_optimiste = Agent(model_llama, [tool], system=prompt_bull)
+agent_pessimiste = Agent(model_llama, [tool], system=prompt_bear)
+agent_moderateur = Agent(model_llama, [], system=prompt_moderateur)
 
-st.set_page_config(page_title="IA Investisseur", page_icon="📈")
-st.title("🚀 Agent d'Investissement Optimiste")
-entreprise = st.text_input("Entrez le nom d'une entreprise :", placeholder="ex: NVIDIA, LVMH, Tesla...")
+st.set_page_config(page_title="IA Investisseur Llama", page_icon="📈")
+st.title("📈 Llama Finance Investigator")
+entreprise = st.text_input("Entreprise :", placeholder="ex: NVIDIA...")
 
-if st.button("Lancer l'investigation"):
-    if entreprise:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.header("🚀 L'Avis du Bull")
-            with st.spinner("L'optimiste cherche des arguments..."):
-                res_opt = agent_optimiste.graph.invoke({"messages": [HumanMessage(content=f"Pourquoi investir dans {entreprise} ?")]})
-                st.success(res_opt['messages'][-1].content)
-                
-        with col2:
-            st.header("📉 L'Avis du Bear")
-            with st.spinner("Le sceptique cherche les failles..."):
-                res_pess = agent_pessimiste.graph.invoke({"messages": [HumanMessage(content=f"Quels sont les risques d'investir dans {entreprise} ?")]})
-                st.error(res_pess['messages'][-1].content)
-        st.divider()
-        st.header("⚖️ VERDICT DU MODÉRATEUR (Self-Consistency)")
-        with st.spinner("⚖️ Le CIO compare les deux positions et va rendre sa décision..."):
-            debat_txt = f"BULL: {res_opt['messages'][-1].content}\nBEAR: {res_pess['messages'][-1].content}"
-            final = get_final_decision(debat_txt)
+if st.button("Lancer l'investigation") and entreprise:
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        with st.spinner("L'optimiste cherche..."):
+            res_opt = agent_optimiste.graph.invoke({"messages": [HumanMessage(content=f"Analyse {entreprise}")]})
+            st.success(res_opt['messages'][-1].content)
             
-            if final:
-                is_achat = "ACHAT" in final['verdict'].upper()
-                score_confiance = final['achat'] if is_achat else final['eviter']
-                if is_achat:
-                    st.success(f"### ✅ {final['verdict']}  |  Score de certitude : {score_confiance:.1f}%")
-                else:
-                    st.error(f"### ❌ {final['verdict']}  |  Score de certitude : {score_confiance:.1f}%")
-            
-            st.info(f"**RESUME**\n\n{final['explication']}")
-                
-            st.warning(f"**FACTEUR DÉCLIC :** {final['declic']}")
-    else:
-        st.warning("Veuillez entrer un nom d'entreprise.")
+    with col2:
+        with st.spinner("Le sceptique cherche..."):
+            res_pess = agent_pessimiste.graph.invoke({"messages": [HumanMessage(content=f"Risques {entreprise}")]})
+            st.error(res_pess['messages'][-1].content)
+
+    st.divider()
+    with st.spinner("⚖️ Décision du CIO en cours..."):
+        debat_txt = f"BULL: {res_opt['messages'][-1].content}\nBEAR: {res_pess['messages'][-1].content}"
+        final = get_final_decision(debat_txt)
+        
+        is_achat = "ACHAT" in final['verdict'].upper()
+        score = final['achat'] if is_achat else final['eviter']
+        
+        if is_achat:
+            st.success(f"### ✅ {final['verdict']} | Certitude : {score:.1f}%")
+            st.error(f"### ❌ {final['verdict']} | Certitude : {score:.1f}%")
+        else:
+            st.error(f"### ❌ {final['verdict']} | Certitude : {score:.1f}%")
+            st.success(f"### ✅ {final['verdict']} | Certitude : {score:.1f}%")
+        
+        st.info(f"**RÉSUMÉ :** {final['explication']}")
+        st.warning(f"**DÉCLIC :** {final['declic']}")
