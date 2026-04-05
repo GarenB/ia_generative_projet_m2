@@ -1,4 +1,4 @@
-# Analyste Financier Llama
+# Analyste Financier GPT-4o
 
 ### Objectif:
 
@@ -39,11 +39,15 @@ Nous utilisons le CoT car une décision d’investissement est un problème comp
 
 #### 2. ReAct (Reason + Act)
 
-Nous utilisons ReAct pour éviter les hallucinations et l’utilisation d’informations obsolètes, car une analyse financière nécessite des données réelles et récentes. Lorsqu'un agent a besoin d’informations financières, il peut agir en appelant un outil externe (TavilySearch).
+Nous utilisons ReAct pour éviter les hallucinations et l’utilisation d’informations obsolètes, car une analyse financière nécessite des données réelles et récentes. Lorsqu'un agent a besoin d’informations financières, il peut agir en appelant 3 outils externes : TavilySearch (actualités), Yahoo Finance grâce à yfinance (données chiffrées) et HuggingFace (analyse des graphiques boursiers).
 
 #### 3. Self-Correction (reflexion)
 
 Nous utilisons la Self-Correction pour améliorer la qualité de la décision finale. Avant de donner son verdict, l'arbitre doit critiquer son propre raisonnement initial pour détecter d’éventuels biais ou incohérences. Il ajuste ensuite son verdict et ses scores de confiance en fonction de cette réflexion.
+
+### GitHub:
+
+https://github.com/GarenB/ia_generative_projet_m2
 
 ### Commande pour lancer le code:
 

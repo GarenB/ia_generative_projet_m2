@@ -1,8 +1,12 @@
 langchain
 langchain-community
 langchain-groq
+langchain-openai
 langchain-tavily
 langgraph
 streamlit
 numpy
 python-dotenv
+yfinance
+requests
+matplotlib
